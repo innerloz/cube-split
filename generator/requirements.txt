@@ -4,3 +4,4 @@ trimesh
 scipy
 networkx
 SimpleITK
+vtk

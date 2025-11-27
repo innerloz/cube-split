@@ -1,92 +1,186 @@
 import numpy as np
-from scipy.spatial import Delaunay, cKDTree
+import SimpleITK as sitk
 import trimesh
+import vtk
+from vtk.util import numpy_support
+from scipy.spatial import cKDTree
 
-def triangulate_and_partition(points, seeds, geometry):
+def generate_labeled_volume(img, num_regions=8):
     """
-    Performs Delaunay triangulation and partitions tetrahedra based on Voronoi seeds.
-    Filters out tetrahedra that are outside the geometry.
+    Generates a labeled volume by partitioning the input image mask
+    using Voronoi seeds within the mask.
     """
-    print(f"Triangulating {len(points)} points...")
-    delaunay = Delaunay(points)
+    print("Generating labeled volume...")
+    data = sitk.GetArrayFromImage(img)
+    # data is (z, y, x)
     
-    print("Partitioning regions...")
-    tet_centroids = np.mean(points[delaunay.simplices], axis=1)
+    valid_z, valid_y, valid_x = np.where(data > 0)
+    coords = np.column_stack((valid_z, valid_y, valid_x))
     
-    # 1. Voronoi Partition
-    tree = cKDTree(seeds)
-    _, tet_labels = tree.query(tet_centroids)
+    if len(coords) == 0:
+        return img
     
-    # 2. Geometry Filter
-    # Mark tets outside the geometry as -1
-    print("Filtering exterior tetrahedra...")
-    is_inside = geometry.contains(tet_centroids)
-    tet_labels[~is_inside] = -1
-    
-    print(f"Removed {np.sum(~is_inside)} exterior tetrahedra.")
-    
-    return delaunay, tet_labels
-
-def extract_region_meshes(delaunay, tet_labels, points, geometry):
-    """
-    Extracts the boundary surfaces for each region using vectorized logic.
-    """
-    print("Extracting surfaces (vectorized)...")
-    scene = trimesh.Scene()
-    unique_labels = np.unique(tet_labels)
-    
-    # Filter out the -1 label (Exterior)
-    unique_labels = unique_labels[unique_labels != -1]
-    
-    neighbors = delaunay.neighbors
-    neighbor_indices = neighbors.copy()
-    sentinel_idx = len(tet_labels)
-    neighbor_indices[neighbors == -1] = sentinel_idx
-    
-    # Extend labels with "Outside" sentinel
-    extended_labels = np.append(tet_labels, -1) 
-    neighbor_labels = extended_labels[neighbor_indices]
-    
-    current_labels = tet_labels[:, np.newaxis]
-    is_boundary_face = current_labels != neighbor_labels
-    
-    simplex_face_indices = np.array([[1, 2, 3], [0, 2, 3], [0, 1, 3], [0, 1, 2]])
-    
-    for region_id in unique_labels:
-        in_region = tet_labels == region_id
-        region_boundary_mask = is_boundary_face[in_region]
+    n_points = len(coords)
+    if n_points < num_regions:
+        num_regions = n_points
         
-        if not np.any(region_boundary_mask):
+    indices = np.random.choice(n_points, num_regions, replace=False)
+    seeds = coords[indices]
+    
+    print(f"Partitioning {n_points} voxels into {num_regions} regions...")
+    tree = cKDTree(seeds)
+    _, labels = tree.query(coords)
+    
+    label_vol = np.zeros_like(data, dtype=np.int32)
+    label_vol[valid_z, valid_y, valid_x] = labels + 1
+    
+    # Create SITK image
+    label_img = sitk.GetImageFromArray(label_vol)
+    label_img.CopyInformation(img)
+    
+    return label_img
+
+def generate_meshes_from_labels(label_img):
+    """
+    Extracts surface meshes using VTK Discrete Marching Cubes.
+    """
+    print("Extracting meshes using VTK Discrete Marching Cubes...")
+    
+    arr = sitk.GetArrayFromImage(label_img)
+    arr = arr.astype(np.int32)
+    
+    size = label_img.GetSize()
+    spacing = label_img.GetSpacing()
+    origin = label_img.GetOrigin()
+    
+    # Convert to VTK
+    flat_data = arr.ravel() # Default C order
+    vtk_data = numpy_support.numpy_to_vtk(num_array=flat_data, deep=True, array_type=vtk.VTK_INT)
+    
+    img_vtk = vtk.vtkImageData()
+    img_vtk.SetDimensions(size)
+    img_vtk.SetSpacing(spacing)
+    img_vtk.SetOrigin(origin)
+    img_vtk.GetPointData().SetScalars(vtk_data)
+    
+    # Discrete Marching Cubes
+    dmc = vtk.vtkDiscreteMarchingCubes()
+    dmc.SetInputData(img_vtk)
+    dmc.GenerateValues(int(arr.max()), 1, int(arr.max()))
+    dmc.Update()
+    
+    # Smoothing
+    print("Smoothing with WindowedSinc...")
+    smoother = vtk.vtkWindowedSincPolyDataFilter()
+    smoother.SetInputConnection(dmc.GetOutputPort())
+    smoother.SetNumberOfIterations(300)
+    smoother.SetPassBand(0.05)
+    smoother.NonManifoldSmoothingOn()
+    smoother.NormalizeCoordinatesOn()
+    smoother.Update()
+    
+    # Compute Normals
+    print("Computing Normals...")
+    normal_gen = vtk.vtkPolyDataNormals()
+    normal_gen.SetInputConnection(smoother.GetOutputPort())
+    normal_gen.ComputePointNormalsOn()
+    normal_gen.ComputeCellNormalsOff()
+    # Match Paraview Defaults: Splitting ON, Feature Angle 30
+    normal_gen.SplittingOn()
+    normal_gen.SetFeatureAngle(30.0)
+    normal_gen.ConsistencyOn()
+    normal_gen.AutoOrientNormalsOn()
+    normal_gen.Update()
+    
+    polydata = normal_gen.GetOutput()
+    
+    scene = trimesh.Scene()
+    unique_labels = np.unique(arr)
+    unique_labels = unique_labels[unique_labels != 0]
+    
+    print(f"Splitting {len(unique_labels)} regions...")
+    
+    # Check scalars
+    scalars = polydata.GetPointData().GetScalars()
+    assoc = vtk.vtkDataObject.FIELD_ASSOCIATION_POINTS
+    
+    if not scalars:
+        scalars = polydata.GetCellData().GetScalars()
+        assoc = vtk.vtkDataObject.FIELD_ASSOCIATION_CELLS
+    
+    if not scalars:
+        print("Error: No scalars found after processing.")
+        return scene
+        
+    scalar_name = scalars.GetName()
+
+    for label in unique_labels:
+        thresh = vtk.vtkThreshold()
+        thresh.SetInputData(polydata)
+        thresh.SetThresholdFunction(vtk.vtkThreshold.THRESHOLD_BETWEEN)
+        thresh.SetLowerThreshold(label)
+        thresh.SetUpperThreshold(label)
+        thresh.SetInputArrayToProcess(0, 0, 0, assoc, scalar_name)
+        thresh.Update()
+        
+        geo = vtk.vtkGeometryFilter()
+        geo.SetInputConnection(thresh.GetOutputPort())
+        geo.Update()
+        
+        output_poly = geo.GetOutput()
+        
+        if output_poly.GetNumberOfPoints() == 0:
             continue
             
-        region_tet_indices = np.where(in_region)[0]
-        rows, cols = np.where(region_boundary_mask)
-        global_tet_indices = region_tet_indices[rows]
+        # Extract Vertices
+        vtk_points = output_poly.GetPoints()
+        if vtk_points is None: continue
+        verts = numpy_support.vtk_to_numpy(vtk_points.GetData())
         
-        vertex_local_indices = simplex_face_indices[cols]
-        target_simplices = delaunay.simplices[global_tet_indices]
+        # Extract Normals
+        vtk_norms = output_poly.GetPointData().GetNormals()
+        normals = None
+        if vtk_norms:
+            normals = numpy_support.vtk_to_numpy(vtk_norms)
         
-        f0 = target_simplices[np.arange(len(rows)), vertex_local_indices[:, 0]]
-        f1 = target_simplices[np.arange(len(rows)), vertex_local_indices[:, 1]]
-        f2 = target_simplices[np.arange(len(rows)), vertex_local_indices[:, 2]]
+        # Extract Triangles
+        vtk_polys = output_poly.GetPolys()
+        if vtk_polys is None: continue
         
-        faces_global = np.stack((f0, f1, f2), axis=1)
-        
-        used_indices = np.unique(faces_global)
-        index_map = np.full(len(points), -1, dtype=int)
-        index_map[used_indices] = np.arange(len(used_indices))
-        
-        local_verts = points[used_indices]
-        local_faces = index_map[faces_global]
-        
-        mesh = trimesh.Trimesh(vertices=local_verts, faces=local_faces)
-        
-        try:
-            trimesh.repair.fix_normals(mesh)
-        except:
-            pass
+        if vtk_polys.GetNumberOfCells() > 0:
+            cells = numpy_support.vtk_to_numpy(vtk_polys.GetData())
+            try:
+                if cells[0] == 3:
+                    faces = cells.reshape(-1, 4)[:, 1:]
+                else:
+                    raise ValueError("Non-triangle cells")
+            except:
+                faces = []
+                vtk_polys.InitTraversal()
+                id_list = vtk.vtkIdList()
+                while vtk_polys.GetNextCell(id_list):
+                    if id_list.GetNumberOfIds() == 3:
+                        faces.append([id_list.GetId(0), id_list.GetId(1), id_list.GetId(2)])
+                faces = np.array(faces)
+        else:
+            faces = np.zeros((0, 3))
             
-        mesh.vertex_normals = geometry.compute_normals(mesh)
-        scene.add_geometry(mesh, node_name=f"region_{region_id}")
+        if len(faces) == 0: continue
+        
+        mesh = trimesh.Trimesh(vertices=verts, faces=faces)
+        
+        if normals is not None:
+            mesh.vertex_normals = normals
+        else:
+            mesh.fix_normals()
+        
+        mesh.visual.face_colors = np.random.randint(0, 255, 4)
+        mesh.visual.face_colors[:, 3] = 255
+        
+        scene.add_geometry(mesh, node_name=f"region_{label}")
+        
+    if scene.is_empty:
+        print("Warning: Scene is empty!")
+        scene.add_geometry(trimesh.creation.box(), node_name="dummy")
         
     return scene

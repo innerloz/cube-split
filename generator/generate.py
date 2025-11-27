@@ -1,23 +1,22 @@
 import os
 from geometry import Sphere, NiftiGeometry
-from points import generate_shell_points
-from meshing import triangulate_and_partition, extract_region_meshes
+from meshing import generate_labeled_volume, generate_meshes_from_labels
 
-def generate_regions(geometry, output_name="model.glb", num_regions=8, num_surface=5000, num_cut=10000):
+def generate_regions(geometry, output_name="model.glb", num_regions=8):
     """
-    Orchestrates the generation of segmented meshes.
+    Orchestrates the generation of segmented meshes using voxel-based meshing.
     """
     print(f"Processing {output_name}...")
     
-    # 1. Generate Point Cloud (Shell only)
-    points, seeds = generate_shell_points(geometry, num_surface=num_surface, num_cut=num_cut, num_seeds=num_regions)
+    # 1. Get Volumetric Representation
+    print("Getting image volume...")
+    img = geometry.get_image()
     
-    # 2. Triangulate & Partition
-    # Pass geometry to allow filtering of exterior tets
-    delaunay, tet_labels = triangulate_and_partition(points, seeds, geometry)
+    # 2. Generate Labeled Volume (Voronoi partitioning on voxels)
+    label_img = generate_labeled_volume(img, num_regions=num_regions)
     
-    # 3. Extract Surfaces
-    scene = extract_region_meshes(delaunay, tet_labels, points, geometry)
+    # 3. Extract Meshes using VTK
+    scene = generate_meshes_from_labels(label_img)
     
     # 4. Export
     output_dir = "../viewer/public"
@@ -36,15 +35,14 @@ if __name__ == "__main__":
     SPHERE = False
     if SPHERE:
        # Sphere
-       generate_regions(Sphere(radius=1.0), "sphere.glb")
+       generate_regions(Sphere(radius=1.0), "sphere.glb", num_regions=8)
     
     # NIfTI Mask (if available)
     nifti_path = "mask.nii.gz"
     if os.path.exists(nifti_path):
         try:
             nifti_geo = NiftiGeometry(nifti_path)
-            # Use exact vertices (num_surface ignored by NiftiGeometry)
-            generate_regions(nifti_geo, "nifti.glb", num_cut=25000)
+            generate_regions(nifti_geo, "nifti.glb", num_regions=8)
         except Exception as e:
             print(f"Failed to process NIfTI file: {e}")
             import traceback
