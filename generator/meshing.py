@@ -69,31 +69,21 @@ def generate_meshes_from_labels(label_img):
     dmc.GenerateValues(int(arr.max()), 1, int(arr.max()))
     dmc.Update()
     
+
     # Smoothing
     print("Smoothing with WindowedSinc...")
     smoother = vtk.vtkWindowedSincPolyDataFilter()
     smoother.SetInputConnection(dmc.GetOutputPort())
-    smoother.SetNumberOfIterations(300)
-    smoother.SetPassBand(0.05)
+    smoother.SetNumberOfIterations(400)
+    smoother.SetPassBand(0.025)
     smoother.NonManifoldSmoothingOn()
     smoother.NormalizeCoordinatesOn()
     smoother.Update()
     
-    # Compute Normals
-    print("Computing Normals...")
-    normal_gen = vtk.vtkPolyDataNormals()
-    normal_gen.SetInputConnection(smoother.GetOutputPort())
-    normal_gen.ComputePointNormalsOn()
-    normal_gen.ComputeCellNormalsOff()
-    # Match Paraview Defaults: Splitting ON, Feature Angle 30
-    normal_gen.SplittingOn()
-    normal_gen.SetFeatureAngle(30.0)
-    normal_gen.ConsistencyOn()
-    normal_gen.AutoOrientNormalsOn()
-    normal_gen.Update()
-    
-    polydata = normal_gen.GetOutput()
-    
+
+
+    polydata = smoother.GetOutput()
+
     scene = trimesh.Scene()
     unique_labels = np.unique(arr)
     unique_labels = unique_labels[unique_labels != 0]

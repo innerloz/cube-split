@@ -9,7 +9,7 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x111111);
 
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-camera.position.z = 4.0; // Zoomed out a bit
+camera.position.z = 2.0; // Default, will be updated
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
@@ -44,7 +44,6 @@ const globalSettings = {
     unifiedColor: 0xffffff,
     model: 'nifti.glb' // Default model
 };
-const regionSettings = {};
 
 // Model loading management
 let currentModel = null;
@@ -54,12 +53,6 @@ function loadModel(modelPath) {
     if (currentModel) {
         scene.remove(currentModel);
         // Clean up GUI
-        for (const key in regionSettings) {
-            // Need to find and remove folders. 
-            // lil-gui doesn't make this super easy without tracking folders.
-            // We'll just destroy and recreate the GUI or folders.
-        }
-        // Simpler: reset GUI completely if possible, or just manage folders better.
         gui.folders.forEach(f => {
             if (f._title !== 'Global Settings' && f._title !== 'Model Selection') {
                 f.destroy();
@@ -89,6 +82,21 @@ function loadModel(modelPath) {
             // Store original color
             child.userData.originalColor = color;
 
+            // Debug Attributes
+            console.log(`Mesh ${child.name} attributes:`, Object.keys(child.geometry.attributes));
+            
+            // 1. Remove Vertex Colors if present (fixes black mesh issue)
+            if (child.geometry.attributes.color) {
+                console.log(`Removing vertex colors from ${child.name}`);
+                child.geometry.deleteAttribute('color');
+            }
+
+            // 2. Ensure Normals exist
+            if (!child.geometry.attributes.normal) {
+                console.warn(`Mesh ${child.name} has NO normals. Computing...`);
+                child.geometry.computeVertexNormals();
+            }
+
             // Apply Unified Look if active
             const displayColor = globalSettings.unifiedLook ? globalSettings.unifiedColor : color;
 
@@ -111,7 +119,6 @@ function loadModel(modelPath) {
             
             // Initialize settings for this mesh
             const name = child.name || `Region ${colorIndex}`;
-            // We don't persist region settings across model loads for simplicity
             
             const folder = gui.addFolder(name);
             const settings = { visible: true, opacity: 1.0 };
@@ -128,12 +135,33 @@ function loadModel(modelPath) {
           }
         });
 
-        // Center the model
+        // Center the model and Fit Camera
         const box = new THREE.Box3().setFromObject(model);
+        const size = box.getSize(new THREE.Vector3());
         const center = box.getCenter(new THREE.Vector3());
         model.position.sub(center);
 
         scene.add(model);
+        
+        console.log("Model loaded. Size:", size);
+        console.log("Mesh Count:", allMeshes.length);
+
+        // Auto-fit Camera to Model
+        const maxDim = Math.max(size.x, size.y, size.z);
+        if (maxDim > 0) {
+            const fov = camera.fov * (Math.PI / 180);
+            let cameraZ = Math.abs(maxDim / (2 * Math.tan(fov / 2)));
+            cameraZ *= 2.5; 
+            
+            camera.position.set(0, 0, cameraZ);
+            camera.far = Math.max(1000, cameraZ * 10);
+            camera.updateProjectionMatrix();
+            
+            controls.target.set(0, 0, 0);
+            controls.update();
+            
+            console.log("Auto-fit camera to Z:", cameraZ);
+        }
         
         // Store meshes for global updates
         scene.userData.allMeshes = allMeshes;
