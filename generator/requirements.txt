@@ -1,0 +1,6 @@
+numpy
+scikit-image
+trimesh
+scipy
+networkx
+SimpleITK
