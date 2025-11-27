@@ -74,7 +74,7 @@ def generate_meshes_from_labels(label_img):
     print("Smoothing with WindowedSinc...")
     smoother = vtk.vtkWindowedSincPolyDataFilter()
     smoother.SetInputConnection(dmc.GetOutputPort())
-    smoother.SetNumberOfIterations(400)
+    smoother.SetNumberOfIterations(100)
     smoother.SetPassBand(0.025)
     smoother.NonManifoldSmoothingOn()
     smoother.NormalizeCoordinatesOn()

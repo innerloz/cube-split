@@ -42,7 +42,7 @@ if __name__ == "__main__":
     if os.path.exists(nifti_path):
         try:
             nifti_geo = NiftiGeometry(nifti_path)
-            generate_regions(nifti_geo, "nifti.glb", num_regions=8)
+            generate_regions(nifti_geo, "nifti.glb", num_regions=58)
         except Exception as e:
             print(f"Failed to process NIfTI file: {e}")
             import traceback
